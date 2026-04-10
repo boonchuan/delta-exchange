@@ -485,6 +485,18 @@ async fn main() {
 
             let mut clob_orders = orders.clone();
             let mut det_orders = orders.clone();
+            // ═══ STRATEGIC ADAPTATION ═══
+            // Under randomized priority, HFTs widen spreads by 15%
+            for order in &mut det_orders {
+                if order.participant == ParticipantType::HFT {
+                    let widening = order.fair_value * 0.00003; // ~15% spread widening
+                    match order.side {
+                        Side::Buy => order.price -= widening,
+                        Side::Sell => order.price += widening,
+                    }
+                    order.price = ((order.price / 0.01).round() * 0.01).max(0.01);
+                }
+            }
 
             let mut clob_fills = Vec::new();
             let mut det_fills = Vec::new();
