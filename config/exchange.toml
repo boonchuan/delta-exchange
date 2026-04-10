@@ -1,0 +1,30 @@
+[exchange]
+name = "ΔEXCHANGE"
+version = "0.1.0"
+environment = "development"
+
+[engine]
+matching_mode = "deterministic"    # deterministic | clob | batch
+batch_interval_ms = 100            # Batch interval for deterministic matching
+max_orders_per_second = 100000
+max_orderbook_depth = 50
+
+[database]
+url = "postgresql://delta:delta_exchange_2026@localhost:5432/delta_exchange"
+max_connections = 20
+
+[redis]
+url = "redis://localhost:6379"
+
+[api]
+rest_port = 8080
+ws_port = 8081
+fix_port = 8082
+admin_port = 8083
+rate_limit_per_minute = 600
+
+[research]
+enabled = true
+tick_data_retention_days = 365
+export_format = "parquet"          # csv | parquet | hdf5
+dual_engine_mode = false           # Run CLOB + DET simultaneously for comparison

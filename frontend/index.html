@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ΔEXCHANGE — Deterministic Exchange</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #06080c; --panel: #0c0f15; --panel-alt: #10141c;
+    --surface: #151a24; --surface-hover: #1a2030;
+    --border: #1e2636; --border-light: #2a3448;
+    --accent: #00e5a0; --accent-dim: #00b37d; --accent-glow: rgba(0,229,160,0.08);
+    --red: #ff4757; --red-glow: rgba(255,71,87,0.08);
+    --green: #00e5a0; --yellow: #ffc048; --blue: #4da6ff;
+    --text: #c8cdd8; --text-bright: #e8ecf2; --text-dim: #6b7590; --text-muted: #3d4660;
+    --white: #f0f2f6;
+  }
+
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  /* ═══ Top Bar ═══ */
+  .topbar {
+    height: 40px; background: var(--panel); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 12px; gap: 12px; flex-shrink: 0;
+  }
+  .logo { font-size: 16px; font-weight: 600; color: var(--accent); }
+  .logo-text { font-size: 12px; font-weight: 600; color: var(--white); letter-spacing: 2px; text-transform: uppercase; }
+  .divider { width: 1px; height: 20px; background: var(--border); }
+  .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px rgba(0,229,160,0.5); }
+  .status-text { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; }
+  .spacer { flex: 1; }
+  .stat-label { font-size: 9px; color: var(--text-dim); }
+  .stat-value { font-size: 11px; color: var(--white); font-weight: 500; }
+
+  /* ═══ Main Layout ═══ */
+  .main { flex: 1; display: flex; overflow: hidden; }
+
+  /* ═══ Instrument Panel ═══ */
+  .instruments {
+    width: 220px; border-right: 1px solid var(--border); background: var(--panel);
+    display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
+  }
+  .cat-tabs { display: flex; flex-wrap: wrap; gap: 1px; padding: 6px 6px 0; }
+  .cat-tab {
+    background: transparent; border: none; color: var(--text-dim);
+    padding: 3px 6px; font: inherit; font-size: 9px; cursor: pointer;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .cat-tab.active { background: var(--accent-glow); color: var(--accent); }
+  .inst-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+  .inst-item {
+    padding: 6px 10px; cursor: pointer; border-left: 2px solid transparent;
+    transition: all 0.1s;
+  }
+  .inst-item:hover { background: var(--surface); }
+  .inst-item.active { background: var(--accent-glow); border-left-color: var(--accent); }
+  .inst-sym { font-size: 11px; font-weight: 500; }
+  .inst-name { font-size: 9px; color: var(--text-dim); font-family: 'IBM Plex Sans', sans-serif; }
+  .inst-price { font-size: 11px; font-weight: 500; color: var(--white); text-align: right; }
+  .inst-change { font-size: 9px; text-align: right; }
+  .inst-row { display: flex; justify-content: space-between; align-items: center; }
+
+  /* ═══ Content Area ═══ */
+  .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* Ticker */
+  .ticker {
+    height: 56px; background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 0 16px; display: flex; align-items: center; gap: 24px; flex-shrink: 0;
+  }
+  .ticker-price { font-size: 22px; font-weight: 600; color: var(--white); }
+  .ticker-change { font-size: 12px; font-weight: 500; }
+  .ticker-label { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; }
+  .ticker-val { font-size: 12px; color: var(--text); }
+  .ticker-badge {
+    background: var(--surface); border: 1px solid var(--border); padding: 4px 10px;
+    font-size: 9px; color: var(--accent); letter-spacing: 1px;
+  }
+
+  /* Grid */
+  .grid {
+    flex: 1; display: grid;
+    grid-template-columns: 1fr 260px 220px;
+    grid-template-rows: 1fr 180px;
+    overflow: hidden;
+  }
+
+  .cell { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); overflow: hidden; display: flex; flex-direction: column; }
+  .cell-header {
+    padding: 6px 10px; border-bottom: 1px solid var(--border);
+    font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px;
+    display: flex; justify-content: space-between; flex-shrink: 0;
+  }
+
+  /* Chart */
+  .chart-area { flex: 1; padding: 12px; position: relative; }
+  .chart-area svg { width: 100%; height: 100%; }
+
+  /* Orderbook */
+  .ob-header { display: grid; grid-template-columns: 1fr 1fr 1fr; padding: 4px 10px; font-size: 9px; color: var(--text-muted); }
+  .ob-row {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; padding: 1px 10px;
+    font-size: 11px; position: relative;
+  }
+  .ob-row .bg { position: absolute; top: 0; bottom: 0; }
+  .ob-asks { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; }
+  .ob-bids { flex: 1; overflow: hidden; }
+  .ob-spread {
+    padding: 4px 10px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+    background: var(--panel-alt); text-align: center;
+  }
+  .ob-spread-price { font-size: 13px; font-weight: 600; color: var(--white); }
+  .ob-spread-val { font-size: 9px; color: var(--text-dim); margin-left: 8px; }
+  .ask-price { color: var(--red); font-weight: 500; text-align: center; }
+  .bid-price { color: var(--green); font-weight: 500; text-align: center; }
+  .ob-qty { color: var(--text-dim); }
+
+  /* Order Entry */
+  .order-entry { padding: 10px; }
+  .side-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 10px; }
+  .side-btn {
+    background: var(--surface); border: 1px solid var(--border); color: var(--text-dim);
+    padding: 6px; font: inherit; font-size: 11px; font-weight: 600; cursor: pointer;
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+  .side-btn.buy.active { background: var(--accent-glow); border-color: rgba(0,229,160,0.4); color: var(--accent); }
+  .side-btn.sell.active { background: var(--red-glow); border-color: rgba(255,71,87,0.4); color: var(--red); }
+  .field-label { font-size: 9px; color: var(--text-dim); margin-bottom: 3px; text-transform: uppercase; letter-spacing: 1px; }
+  .field-input {
+    width: 100%; background: var(--surface); border: 1px solid var(--border);
+    color: var(--white); padding: 6px 8px; font: inherit; font-size: 12px;
+    margin-bottom: 8px;
+  }
+  .submit-btn {
+    width: 100%; padding: 10px; border: none; font: inherit;
+    font-size: 12px; font-weight: 600; cursor: pointer;
+    text-transform: uppercase; letter-spacing: 2px;
+  }
+  .submit-btn.buy { background: var(--accent); color: var(--bg); }
+  .submit-btn.sell { background: var(--red); color: var(--white); }
+
+  /* Trades */
+  .trade-row { display: grid; grid-template-columns: 1fr 1fr 1fr; padding: 2px 12px; font-size: 10px; border-bottom: 1px solid rgba(30,38,54,0.3); }
+  .trade-row .buy { color: var(--green); }
+  .trade-row .sell { color: var(--red); }
+
+  /* Bottom Tabs */
+  .bottom-tabs { display: flex; gap: 16px; }
+  .bottom-tab { color: var(--text-dim); cursor: pointer; }
+  .bottom-tab.active { color: var(--accent); }
+
+  .my-order-row { display: grid; grid-template-columns: 60px 50px 60px 80px 1fr 80px; padding: 3px 12px; font-size: 10px; border-bottom: 1px solid rgba(30,38,54,0.3); align-items: center; }
+  .empty-msg { padding: 12px; color: var(--text-muted); font-size: 10px; font-family: 'IBM Plex Sans', sans-serif; }
+
+  /* Status Bar */
+  .statusbar {
+    height: 22px; background: var(--panel); border-top: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 12px; gap: 16px;
+    font-size: 9px; color: var(--text-dim); flex-shrink: 0;
+  }
+
+  /* Research Panel */
+  .research-panel { padding: 20px; overflow-y: auto; }
+  .research-panel h2 { font-size: 18px; font-weight: 600; color: var(--white); font-family: 'IBM Plex Sans',sans-serif; margin-bottom: 16px; }
+  .metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .metric-card { background: var(--panel); border: 1px solid var(--border); padding: 16px; }
+  .metric-card .label { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+  .metric-card .value { font-size: 22px; font-weight: 600; }
+  .data-table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 16px; }
+  .data-table th { text-align: left; padding: 6px 10px; color: var(--text-dim); font-weight: 400; font-size: 9px; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid var(--border); }
+  .data-table td { padding: 6px 10px; border-bottom: 1px solid rgba(30,38,54,0.5); }
+
+  .tab-bar { display: flex; gap: 2px; }
+  .tab-btn {
+    background: transparent; border: 1px solid transparent; color: var(--text-dim);
+    padding: 4px 12px; font: inherit; font-size: 10px; cursor: pointer;
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+  .tab-btn.active { background: rgba(0,229,160,0.15); border-color: rgba(0,229,160,0.25); color: var(--accent); }
+
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="logo">Δ</span>
+  <span class="logo-text">EXCHANGE</span>
+  <div class="divider"></div>
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="switchView('trade')">Trade</button>
+    <button class="tab-btn" onclick="switchView('research')">Research</button>
+  </div>
+  <div class="spacer"></div>
+  <span class="status-dot" id="engineDot"></span>
+  <span class="status-text">Engine</span>
+  <span class="stat-label">Fills:</span>
+  <span class="stat-value" id="totalFills">0</span>
+  <span class="stat-label">Orders:</span>
+  <span class="stat-value" id="totalOrders">0</span>
+  <div class="divider"></div>
+  <span class="stat-value" id="uptime">0s</span>
+</div>
+
+<!-- ═══ TRADE VIEW ═══ -->
+<div class="main" id="tradeView">
+  <!-- Instruments -->
+  <div class="instruments">
+    <div class="cat-tabs" id="catTabs"></div>
+    <div class="inst-list" id="instList"></div>
+  </div>
+
+  <div class="content">
+    <!-- Ticker -->
+    <div class="ticker">
+      <div>
+        <div class="ticker-label" id="tickerName">—</div>
+        <div style="display:flex;align-items:baseline;gap:8px">
+          <span class="ticker-price" id="tickerPrice">—</span>
+          <span class="ticker-change" id="tickerChange">—</span>
+        </div>
+      </div>
+      <div><div class="ticker-label">Vol</div><div class="ticker-val" id="tickerVol">0</div></div>
+      <div><div class="ticker-label">Fills</div><div class="ticker-val" id="tickerFills">0</div></div>
+      <div><div class="ticker-label">Bid Lvls</div><div class="ticker-val" id="tickerBids">0</div></div>
+      <div><div class="ticker-label">Ask Lvls</div><div class="ticker-val" id="tickerAsks">0</div></div>
+      <div class="spacer"></div>
+      <div class="ticker-badge">DETERMINISTIC MATCHING</div>
+    </div>
+
+    <!-- Grid -->
+    <div class="grid">
+      <!-- Chart -->
+      <div class="cell">
+        <div class="cell-header"><span>Price Chart</span><span id="chartSymbol">—</span></div>
+        <div class="chart-area"><svg id="chartSvg" viewBox="0 0 600 250" preserveAspectRatio="none"></svg></div>
+      </div>
+
+      <!-- Orderbook -->
+      <div class="cell">
+        <div class="cell-header"><span>Order Book</span><span style="color:var(--accent)">DET</span></div>
+        <div class="ob-header"><span>QTY</span><span style="text-align:center">PRICE</span><span style="text-align:right">QTY</span></div>
+        <div class="ob-asks" id="obAsks"></div>
+        <div class="ob-spread">
+          <span class="ob-spread-price" id="obSpreadPrice">—</span>
+          <span class="ob-spread-val" id="obSpreadVal"></span>
+        </div>
+        <div class="ob-bids" id="obBids"></div>
+      </div>
+
+      <!-- Order Entry -->
+      <div class="cell">
+        <div class="cell-header"><span>Order Entry</span></div>
+        <div class="order-entry">
+          <div class="side-toggle">
+            <button class="side-btn buy active" id="btnBuy" onclick="setSide('BUY')">Buy</button>
+            <button class="side-btn sell" id="btnSell" onclick="setSide('SELL')">Sell</button>
+          </div>
+          <div class="field-label">Price</div>
+          <input class="field-input" type="number" id="orderPrice" step="any" placeholder="0.00">
+          <div class="field-label">Quantity</div>
+          <input class="field-input" type="number" id="orderQty" value="1" step="any">
+          <button class="submit-btn buy" id="submitBtn" onclick="submitOrder()">BUY</button>
+          <div style="margin-top:8px;padding:6px 8px;background:var(--surface);border:1px solid var(--border);font-size:9px;color:var(--text-dim)">
+            <span id="orderInfo">Select an instrument</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent Trades -->
+      <div class="cell">
+        <div class="cell-header"><span>Recent Trades</span></div>
+        <div style="flex:1;overflow-y:auto" id="tradesList"></div>
+      </div>
+
+      <!-- My Orders -->
+      <div class="cell" style="grid-column: 2/4">
+        <div class="cell-header">
+          <div class="bottom-tabs">
+            <span class="bottom-tab active">My Orders</span>
+          </div>
+        </div>
+        <div style="flex:1;overflow-y:auto" id="myOrders">
+          <div class="empty-msg">No orders yet. Place an order above.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ RESEARCH VIEW ═══ -->
+<div class="main research-panel" id="researchView" style="display:none">
+  <div style="max-width:1000px">
+    <div style="font-size:10px;color:var(--accent);text-transform:uppercase;letter-spacing:2px;margin-bottom:8px">Research Data</div>
+    <h2>Deterministic Engine — Live Metrics</h2>
+    <div class="metric-grid">
+      <div class="metric-card"><div class="label">Total Fills</div><div class="value" style="color:var(--accent)" id="rFills">0</div></div>
+      <div class="metric-card"><div class="label">Active Instruments</div><div class="value" style="color:var(--blue)" id="rInstruments">0</div></div>
+      <div class="metric-card"><div class="label">Total Orders</div><div class="value" style="color:var(--yellow)" id="rOrders">0</div></div>
+      <div class="metric-card"><div class="label">Matching Mode</div><div class="value" style="color:var(--accent);font-size:14px" id="rMode">—</div></div>
+    </div>
+
+    <div style="font-size:12px;font-weight:600;color:var(--white);margin-bottom:8px">Orderbook State — All Instruments</div>
+    <table class="data-table" id="researchTable">
+      <thead><tr><th>Symbol</th><th>Bids</th><th>Asks</th><th>Best Bid</th><th>Best Ask</th><th>Spread</th><th>Last Price</th></tr></thead>
+      <tbody id="researchBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Status Bar -->
+<div class="statusbar">
+  <span>ΔEXCHANGE v0.1.0</span><span>|</span>
+  <span>Instruments: <span id="sbInst">0</span></span><span>|</span>
+  <span>Matching: <span style="color:var(--accent)">DETERMINISTIC</span></span>
+  <div class="spacer"></div>
+  <span id="sbTime"></span>
+</div>
+
+<script>
+const API = window.location.origin;
+const CATEGORIES = {
+  equities: ['DETX','DTEC','DFIN','DHLTH'],
+  commodities: ['DCRUDF','DGOLDF','DSLVRF','DNATGF','DCORNF','DWHEAT'],
+  crypto: ['DBTCP','DETHP','DSOLP'],
+  fx: ['DEURUSD','DGBPUSD','DUSDJPY'],
+  rates: ['DUS10Y','DUS2Y']
+};
+
+let instruments = [];
+let activeSym = 'DBTCP';
+let activeCat = 'crypto';
+let orderSide = 'BUY';
+let priceHistory = {};
+let myOrders = [];
+let stats = {};
+
+// ─── Init ───
+async function init() {
+  try {
+    const resp = await fetch(`${API}/api/instruments`);
+    instruments = await resp.json();
+  } catch(e) { console.error('Failed to load instruments', e); }
+
+  renderCatTabs();
+  renderInstList();
+  pollLoop();
+}
+
+function switchView(v) {
+  document.getElementById('tradeView').style.display = v === 'trade' ? 'flex' : 'none';
+  document.getElementById('researchView').style.display = v === 'research' ? 'block' : 'none';
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+}
+
+// ─── Polling ───
+async function pollLoop() {
+  while(true) {
+    try {
+      const [statsResp, obResp] = await Promise.all([
+        fetch(`${API}/api/stats`).then(r => r.json()),
+        fetch(`${API}/api/orderbook/${activeSym}`).then(r => r.json())
+      ]);
+      stats = statsResp;
+      updateTopBar(statsResp);
+      updateTicker(statsResp);
+      updateOrderbook(obResp);
+      updateChart(obResp);
+      updateResearch(statsResp);
+      updateInstPrices(statsResp);
+    } catch(e) { console.error(e); }
+    await sleep(1000);
+  }
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ─── Render ───
+function renderCatTabs() {
+  const el = document.getElementById('catTabs');
+  el.innerHTML = Object.keys(CATEGORIES).map(c =>
+    `<button class="cat-tab ${c===activeCat?'active':''}" onclick="setCat('${c}')">${c}</button>`
+  ).join('');
+}
+
+function setCat(c) { activeCat = c; renderCatTabs(); renderInstList(); }
+
+function renderInstList() {
+  const el = document.getElementById('instList');
+  const syms = CATEGORIES[activeCat] || [];
+  el.innerHTML = syms.map(sym => {
+    const inst = instruments.find(i => i.symbol === sym);
+    const name = inst ? inst.name : sym;
+    const isActive = sym === activeSym;
+    return `<div class="inst-item ${isActive?'active':''}" onclick="selectInst('${sym}')">
+      <div class="inst-row">
+        <div><div class="inst-sym" style="color:${isActive?'var(--white)':'var(--text)'}">${sym}</div>
+        <div class="inst-name">${name}</div></div>
+        <div><div class="inst-price" id="ip_${sym}">—</div>
+        <div class="inst-change" id="ic_${sym}">—</div></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function selectInst(sym) {
+  activeSym = sym;
+  priceHistory[sym] = priceHistory[sym] || [];
+  renderInstList();
+  document.getElementById('chartSymbol').textContent = sym;
+}
+
+function updateInstPrices(st) {
+  st.orderbooks.forEach(ob => {
+    const pel = document.getElementById('ip_'+ob.symbol);
+    const cel = document.getElementById('ic_'+ob.symbol);
+    if(pel && ob.last_price) {
+      pel.textContent = fmtPx(parseFloat(ob.last_price));
+      if(!priceHistory[ob.symbol]) priceHistory[ob.symbol] = [];
+      priceHistory[ob.symbol].push(parseFloat(ob.last_price));
+      if(priceHistory[ob.symbol].length > 300) priceHistory[ob.symbol].shift();
+    }
+    if(cel && ob.spread) {
+      cel.textContent = `spread: ${fmtPx(parseFloat(ob.spread))}`;
+      cel.style.color = 'var(--text-dim)';
+    }
+  });
+}
+
+function updateTopBar(st) {
+  document.getElementById('totalFills').textContent = st.total_fills.toLocaleString();
+  document.getElementById('totalOrders').textContent = st.total_orders.toLocaleString();
+  document.getElementById('sbInst').textContent = st.instruments_active;
+  document.getElementById('sbTime').textContent = new Date().toLocaleTimeString();
+}
+
+function updateTicker(st) {
+  const ob = st.orderbooks.find(o => o.symbol === activeSym);
+  if(!ob) return;
+  const inst = instruments.find(i => i.symbol === activeSym);
+  document.getElementById('tickerName').textContent = inst ? inst.name : activeSym;
+  document.getElementById('tickerPrice').textContent = ob.last_price ? fmtPx(parseFloat(ob.last_price)) : '—';
+  document.getElementById('tickerBids').textContent = ob.bid_levels;
+  document.getElementById('tickerAsks').textContent = ob.ask_levels;
+  document.getElementById('tickerFills').textContent = st.total_fills;
+
+  const sp = ob.spread ? fmtPx(parseFloat(ob.spread)) : '—';
+  if(ob.last_price) {
+    document.getElementById('tickerChange').textContent = `spread: ${sp}`;
+    document.getElementById('tickerChange').style.color = 'var(--text-dim)';
+  }
+}
+
+function updateOrderbook(ob) {
+  if(ob.error) return;
+  const maxQty = Math.max(
+    ...ob.bids.map(b => parseFloat(b.quantity)),
+    ...ob.asks.map(a => parseFloat(a.quantity)),
+    1
+  );
+
+  // Asks (reversed)
+  const asksEl = document.getElementById('obAsks');
+  asksEl.innerHTML = ob.asks.slice(0,10).reverse().map(a => {
+    const w = (parseFloat(a.quantity)/maxQty*100).toFixed(0);
+    return `<div class="ob-row"><div class="bg" style="right:0;width:${w}%;background:var(--red-glow)"></div>
+      <span></span><span class="ask-price" style="position:relative">${fmtPx(parseFloat(a.price))}</span>
+      <span class="ob-qty" style="text-align:right;position:relative">${a.quantity}</span></div>`;
+  }).join('');
+
+  // Spread
+  if(ob.bids.length && ob.asks.length) {
+    const mid = (parseFloat(ob.bids[0].price) + parseFloat(ob.asks[0].price)) / 2;
+    document.getElementById('obSpreadPrice').textContent = fmtPx(mid);
+    document.getElementById('obSpreadVal').textContent = `spread: ${fmtPx(parseFloat(ob.asks[0].price) - parseFloat(ob.bids[0].price))}`;
+  } else if(ob.last_price) {
+    document.getElementById('obSpreadPrice').textContent = fmtPx(parseFloat(ob.last_price));
+    document.getElementById('obSpreadVal').textContent = '';
+  }
+
+  // Bids
+  const bidsEl = document.getElementById('obBids');
+  bidsEl.innerHTML = ob.bids.slice(0,10).map(b => {
+    const w = (parseFloat(b.quantity)/maxQty*100).toFixed(0);
+    return `<div class="ob-row"><div class="bg" style="left:0;width:${w}%;background:var(--accent-glow)"></div>
+      <span class="ob-qty" style="position:relative">${b.quantity}</span>
+      <span class="bid-price" style="position:relative">${fmtPx(parseFloat(b.price))}</span><span></span></div>`;
+  }).join('');
+}
+
+function updateChart(ob) {
+  const data = priceHistory[activeSym] || [];
+  if(data.length < 2) return;
+  const svg = document.getElementById('chartSvg');
+  const w = 600, h = 250;
+  const mn = Math.min(...data), mx = Math.max(...data), rng = mx - mn || 1;
+
+  const pts = data.map((v,i) => `${(i/(data.length-1))*w},${h-((v-mn)/rng)*(h-20)-10}`).join(' ');
+  const gradPts = `0,${h} ${pts} ${w},${h}`;
+  const clr = data[data.length-1] >= data[0] ? 'var(--green)' : 'var(--red)';
+  const lastY = h-((data[data.length-1]-mn)/rng)*(h-20)-10;
+
+  let gridLines = '';
+  for(let i=0;i<5;i++) {
+    const y = (i/4)*h;
+    const val = mx - (i/4)*rng;
+    gridLines += `<line x1="0" y1="${y}" x2="${w}" y2="${y}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="4,4"/>
+      <text x="${w-4}" y="${y-3}" text-anchor="end" fill="var(--text-muted)" font-size="8" font-family="IBM Plex Mono">${fmtPx(val)}</text>`;
+  }
+
+  svg.innerHTML = `
+    <defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${clr}" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="${clr}" stop-opacity="0"/></linearGradient></defs>
+    ${gridLines}
+    <polygon fill="url(#cg)" points="${gradPts}"/>
+    <polyline fill="none" stroke="${clr}" stroke-width="1.5" points="${pts}"/>
+    <circle cx="${w}" cy="${lastY}" r="3" fill="${clr}"><animate attributeName="opacity" values="1;0.3;1" dur="1.5s" repeatCount="indefinite"/></circle>`;
+}
+
+function updateResearch(st) {
+  document.getElementById('rFills').textContent = st.total_fills.toLocaleString();
+  document.getElementById('rOrders').textContent = st.total_orders.toLocaleString();
+  document.getElementById('rInstruments').textContent = st.instruments_active;
+  document.getElementById('rMode').textContent = st.matching_mode;
+
+  const body = document.getElementById('researchBody');
+  body.innerHTML = st.orderbooks.map(ob => `<tr>
+    <td style="color:var(--accent);font-weight:500">${ob.symbol}</td>
+    <td>${ob.bid_levels}</td><td>${ob.ask_levels}</td>
+    <td style="color:var(--green)">${ob.best_bid ? fmtPx(parseFloat(ob.best_bid)) : '—'}</td>
+    <td style="color:var(--red)">${ob.best_ask ? fmtPx(parseFloat(ob.best_ask)) : '—'}</td>
+    <td>${ob.spread ? fmtPx(parseFloat(ob.spread)) : '—'}</td>
+    <td style="color:var(--white)">${ob.last_price ? fmtPx(parseFloat(ob.last_price)) : '—'}</td>
+  </tr>`).join('');
+}
+
+// ─── Order Entry ───
+function setSide(s) {
+  orderSide = s;
+  document.getElementById('btnBuy').classList.toggle('active', s==='BUY');
+  document.getElementById('btnSell').classList.toggle('active', s==='SELL');
+  const btn = document.getElementById('submitBtn');
+  btn.textContent = `${s} ${activeSym}`;
+  btn.className = `submit-btn ${s.toLowerCase()}`;
+}
+
+async function submitOrder() {
+  const price = document.getElementById('orderPrice').value;
+  const qty = document.getElementById('orderQty').value;
+  if(!price || !qty) return;
+
+  const body = { symbol: activeSym, side: orderSide, order_type: 'LIMIT', price: price, quantity: qty };
+
+  try {
+    const resp = await fetch(`${API}/api/order`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+
+    myOrders.unshift({ ...body, order_id: data.order_id, status: data.status, filled_qty: data.filled_qty, time: new Date() });
+    if(myOrders.length > 50) myOrders.pop();
+    renderMyOrders();
+
+    if(data.fills && data.fills.length > 0) {
+      const el = document.getElementById('tradesList');
+      data.fills.forEach(f => {
+        el.innerHTML = `<div class="trade-row"><span class="${orderSide.toLowerCase()}">${fmtPx(parseFloat(f.price))}</span><span style="color:var(--text-dim);text-align:center">${f.quantity}</span><span style="color:var(--text-muted);text-align:right">${new Date(f.timestamp).toLocaleTimeString()}</span></div>` + el.innerHTML;
+      });
+    }
+  } catch(e) { console.error(e); }
+}
+
+function renderMyOrders() {
+  const el = document.getElementById('myOrders');
+  if(!myOrders.length) { el.innerHTML = '<div class="empty-msg">No orders yet.</div>'; return; }
+  el.innerHTML = myOrders.map(o => `<div class="my-order-row">
+    <span style="color:${o.side==='BUY'?'var(--green)':'var(--red)'};text-transform:uppercase;font-weight:500">${o.side}</span>
+    <span style="color:var(--text-dim)">LIMIT</span>
+    <span style="color:var(--text)">${o.symbol}</span>
+    <span style="color:var(--white)">${o.price}</span>
+    <span style="color:var(--text-dim)">qty: ${o.quantity}</span>
+    <span style="color:var(--accent);font-size:9px">${o.status}</span>
+  </div>`).join('');
+}
+
+function fmtPx(n) {
+  if(n >= 10000) return n.toFixed(2);
+  if(n >= 100) return n.toFixed(2);
+  if(n >= 1) return n.toFixed(4);
+  return n.toFixed(4);
+}
+
+// Start
+setSide('BUY');
+init();
+</script>
+</body>
+</html>
