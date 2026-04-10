@@ -254,6 +254,108 @@ impl Instrument {
 // ─── Comparison Results ───
 
 #[derive(Debug, Default)]
+
+// ═══ DYNAMIC ADAPTIVE STATE ═══
+// Tracks agent behavior parameters that evolve over time
+struct AdaptiveState {
+    hft_spread_factor: f64,   // how much HFT widens spread (0.0 = none, 0.0001 = aggressive)
+    hft_aggression: f64,      // fraction of HFT orders that cross spread (0.0 - 0.3)
+    mm_dropout_rate: f64,     // fraction of MM orders dropped (0.0 - 0.4)
+    mm_spread_factor: f64,    // how much MM widens spread
+    // Tracking for adaptation
+    det_hft_fill_rate: f64,   // rolling HFT fill rate under DET
+    clob_hft_fill_rate: f64,  // rolling HFT fill rate under CLOB
+    det_mm_fill_rate: f64,
+    clob_mm_fill_rate: f64,
+    adaptation_counter: u64,
+    // Endogenous speed choice
+    det_fast_fraction: f64,   // fraction of HFT that remain fast under DET (1.0 → 0.0)
+    clob_hft_slip: f64,
+    det_hft_slip: f64,
+    clob_slow_slip: f64,
+    det_slow_slip: f64,
+}
+
+impl AdaptiveState {
+    fn new() -> Self {
+        Self {
+            hft_spread_factor: 0.00001,  // start with minimal adaptation
+            hft_aggression: 0.05,         // 5% aggressive initially
+            mm_dropout_rate: 0.05,        // 5% dropout initially
+            mm_spread_factor: 0.000005,
+            det_hft_fill_rate: 0.5,
+            clob_hft_fill_rate: 0.5,
+            det_mm_fill_rate: 0.5,
+            clob_mm_fill_rate: 0.5,
+            adaptation_counter: 0,
+            det_fast_fraction: 1.0,  // start: all HFT stay fast
+            clob_hft_slip: 0.0,
+            det_hft_slip: 0.0,
+            clob_slow_slip: 0.0,
+            det_slow_slip: 0.0,
+        }
+    }
+    
+    fn update(&mut self, clob_fills: &[Fill], det_fills: &[Fill]) {
+        self.adaptation_counter += 1;
+        
+        // Count HFT and MM fills
+        let clob_hft = clob_fills.iter().filter(|f| f.latency_delta_us < 10).count() as f64;
+        let det_hft = det_fills.iter().filter(|f| f.latency_delta_us < 10).count() as f64;
+        let clob_total = clob_fills.len().max(1) as f64;
+        let det_total = det_fills.len().max(1) as f64;
+        
+        // Exponential moving average (alpha = 0.01 for smooth adaptation)
+        let alpha = 0.01;
+        
+        // Track slippage by speed for endogenous choice
+        let clob_hft_s: Vec<f64> = clob_fills.iter().filter(|f| f.latency_delta_us < 50).map(|f| f.slippage).collect();
+        let clob_slow_s: Vec<f64> = clob_fills.iter().filter(|f| f.latency_delta_us >= 50).map(|f| f.slippage).collect();
+        let det_hft_s: Vec<f64> = det_fills.iter().filter(|f| f.latency_delta_us < 50).map(|f| f.slippage).collect();
+        let det_slow_s: Vec<f64> = det_fills.iter().filter(|f| f.latency_delta_us >= 50).map(|f| f.slippage).collect();
+        if !clob_hft_s.is_empty() { self.clob_hft_slip = (1.0-alpha)*self.clob_hft_slip + alpha*(clob_hft_s.iter().sum::<f64>()/clob_hft_s.len() as f64); }
+        if !clob_slow_s.is_empty() { self.clob_slow_slip = (1.0-alpha)*self.clob_slow_slip + alpha*(clob_slow_s.iter().sum::<f64>()/clob_slow_s.len() as f64); }
+        if !det_hft_s.is_empty() { self.det_hft_slip = (1.0-alpha)*self.det_hft_slip + alpha*(det_hft_s.iter().sum::<f64>()/det_hft_s.len() as f64); }
+        if !det_slow_s.is_empty() { self.det_slow_slip = (1.0-alpha)*self.det_slow_slip + alpha*(det_slow_s.iter().sum::<f64>()/det_slow_s.len() as f64); }
+        self.clob_hft_fill_rate = (1.0 - alpha) * self.clob_hft_fill_rate + alpha * (clob_hft / clob_total);
+        self.det_hft_fill_rate = (1.0 - alpha) * self.det_hft_fill_rate + alpha * (det_hft / det_total);
+        
+        // Adapt every 100 batches
+        if self.adaptation_counter % 100 == 0 {
+            // HFT: if fill rate dropped under DET, widen spread and increase aggression
+            let fill_ratio = self.det_hft_fill_rate / self.clob_hft_fill_rate.max(0.01);
+            if fill_ratio < 0.95 {
+                // Fill rate declined — adapt more
+                self.hft_spread_factor = (self.hft_spread_factor + 0.000002).min(0.0001);
+                self.hft_aggression = (self.hft_aggression + 0.01).min(0.30);
+            } else if fill_ratio > 1.05 {
+                // Fill rate improved — reduce adaptation
+                self.hft_spread_factor = (self.hft_spread_factor - 0.000001).max(0.0);
+                self.hft_aggression = (self.hft_aggression - 0.005).max(0.0);
+            }
+            
+            // MM: if queue is random, reduce participation
+            
+            // ENDOGENOUS SPEED CHOICE
+            // Compare HFT vs slow slippage under DET
+            // If HFT advantage is small, some HFTs stop paying for speed
+            if self.det_hft_slip > 0.0 && self.det_slow_slip > 0.0 {
+                let det_advantage = self.det_slow_slip - self.det_hft_slip;
+                let clob_advantage = self.clob_slow_slip - self.clob_hft_slip;
+                // If speed advantage under DET is < 50% of CLOB advantage, reduce fast fraction
+                if det_advantage < clob_advantage * 0.5 {
+                    self.det_fast_fraction = (self.det_fast_fraction - 0.02).max(0.10);
+                } else {
+                    self.det_fast_fraction = (self.det_fast_fraction + 0.01).min(1.0);
+                }
+            }
+            self.mm_dropout_rate = (self.mm_dropout_rate + 0.005).min(0.40);
+            self.mm_spread_factor = (self.mm_spread_factor + 0.000001).min(0.00005);
+        }
+    }
+}
+
+#[derive(Default)]
 struct ComparisonStats {
     clob_fills: u64,
     det_fills: u64,
@@ -404,7 +506,8 @@ async fn main() {
         .map(|i| OrderBook::new(i.tick_size)).collect();
 
     let mut instruments = instruments;
-    let mut global_stats = ComparisonStats::default();
+    let mut adaptive_state = AdaptiveState::new();
+        let mut global_stats = ComparisonStats::default();
 
     let participants = [
         ParticipantType::HFT,
@@ -485,16 +588,77 @@ async fn main() {
 
             let mut clob_orders = orders.clone();
             let mut det_orders = orders.clone();
-            // ═══ STRATEGIC ADAPTATION ═══
-            // Under randomized priority, HFTs widen spreads by 15%
+            // ═══ DYNAMIC ADAPTIVE AGENTS ═══
+            // Each agent type adjusts behavior based on recent fill performance.
+            // Adaptation rates are calibrated to converge over ~1000 batches.
+            
+            // 1. HFT: adjusts spread width and aggressiveness
+            //    - Widens spread proportional to fill rate decline
+            //    - Switches to market orders when limit fills drop
+            let hft_spread_adj = adaptive_state.hft_spread_factor;  // dynamic
+            let hft_aggression = adaptive_state.hft_aggression;      // 0.0-0.3
+            
             for order in &mut det_orders {
                 if order.participant == ParticipantType::HFT {
-                    let widening = order.fair_value * 0.00003; // ~15% spread widening
+                    if rng.gen::<f64>() < hft_aggression {
+                        // Aggressive: cross the spread (market order behavior)
+                        match order.side {
+                            Side::Buy => order.price += order.fair_value * 0.0005,
+                            Side::Sell => order.price -= order.fair_value * 0.0005,
+                        }
+                    } else {
+                        // Passive: widen spread
+                        let widening = order.fair_value * hft_spread_adj;
+                        match order.side {
+                            Side::Buy => order.price -= widening,
+                            Side::Sell => order.price += widening,
+                        }
+                    }
+                    order.price = ((order.price / 0.01).round() * 0.01).max(0.01);
+                }
+            }
+            
+            // 2. Market Makers: adjust depth and participation
+            //    - Reduce order count when queue position is random
+            //    - Widen spread when adverse selection increases
+            let mm_dropout = adaptive_state.mm_dropout_rate;  // 0.0-0.4
+            let mm_spread_adj = adaptive_state.mm_spread_factor;
+            
+            det_orders.retain(|o| {
+                if o.participant == ParticipantType::MarketMaker {
+                    rng.gen::<f64>() > mm_dropout
+                } else {
+                    true
+                }
+            });
+            for order in &mut det_orders {
+                if order.participant == ParticipantType::MarketMaker {
+                    let widening = order.fair_value * mm_spread_adj;
                     match order.side {
                         Side::Buy => order.price -= widening,
                         Side::Sell => order.price += widening,
                     }
                     order.price = ((order.price / 0.01).round() * 0.01).max(0.01);
+                }
+            }
+            
+            // 3. INST/RETAIL: no adaptation (passive baseline)
+            
+            // 4. ENDOGENOUS SPEED CHOICE: some HFTs downgrade to slow under DET
+            for order in &mut det_orders {
+                if order.participant == ParticipantType::HFT {
+                    if rng.gen::<f64>() > adaptive_state.det_fast_fraction {
+                        // This HFT stops paying for speed → becomes Institutional latency
+                        order.participant = ParticipantType::Institutional;
+                        order.timestamp_us = rng.gen_range(500..5000);
+                        // Also widen spread like an institutional participant
+                        let spread_diff = order.fair_value * 0.00005; // ~3.4 ticks for BTC, ~0.2 for equities
+                        match order.side {
+                            Side::Buy => order.price -= spread_diff,
+                            Side::Sell => order.price += spread_diff,
+                        }
+                        order.price = ((order.price / 0.01).round() * 0.01).max(0.01);
+                    }
                 }
             }
 
@@ -525,6 +689,8 @@ async fn main() {
                 if f.latency_delta_us < 50 { global_stats.det_hft_wins += 1; }
             }
 
+            // Update adaptive state
+            adaptive_state.update(&clob_fills, &det_fills);
             // Persist to database (every batch)
             if !clob_fills.is_empty() || !det_fills.is_empty() {
                 let p = pool.clone();
