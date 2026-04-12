@@ -2,3 +2,5 @@ target/
 *.swp
 .env
 *.log
+.env
+*.dbn.zst
