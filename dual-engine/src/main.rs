@@ -9,6 +9,7 @@ use sqlx::PgPool;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use uuid::Uuid;
+mod queue_mechanisms;
 
 // ══════════════════════════════════════════════════════════════
 //  ΔEXCHANGE — Dual Engine Comparison Simulator
@@ -23,7 +24,7 @@ use uuid::Uuid;
 enum Side { Buy, Sell }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mechanism { Clob, Deterministic }
+enum Mechanism { Clob, Deterministic, ThrottledTime1ms, ThrottledTime10ms, ThrottledTime100ms, AgeWeighted, SizeWeighted, RotatingPriority, RandomPerParticipant }
 
 #[derive(Debug, Clone)]
 struct Order {
@@ -143,18 +144,8 @@ impl OrderBook {
                 None => continue,
             };
 
-            // ═══ KEY DIFFERENCE BETWEEN MECHANISMS ═══
-            match mechanism {
-                Mechanism::Clob => {
-                    // CLOB: sort by arrival time (time priority)
-                    resting.sort_by_key(|o| o.timestamp_us);
-                }
-                Mechanism::Deterministic => {
-                    // DETERMINISTIC: random shuffle (eliminates time priority)
-                    let mut rng = rand::thread_rng();
-                    resting.shuffle(&mut rng);
-                }
-            }
+            // ═══ QUEUE MECHANISM DISPATCH ═══
+            queue_mechanisms::sort_queue(&mut resting, mechanism);
 
             let mut i = 0;
             while i < resting.len() && order.remaining > 0.0 {
@@ -428,7 +419,7 @@ async fn persist_comparison(pool: &PgPool, symbol: &str, clob_fills: &[Fill], de
     }
 
     for fill in det_fills {
-        let mech = "DETERMINISTIC";
+        let mech = format!("{:?}", fill.mechanism).to_uppercase();
         let ptype = fill.aggressor_participant.name();
         let _ = sqlx::query(
             "INSERT INTO tick_data (time, symbol, fill_price, fair_value, slippage, mechanism, batch_id, latency_delta, participant_type) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8)"
@@ -502,6 +493,19 @@ async fn main() {
     // Separate orderbooks for each mechanism × instrument
     let mut clob_books: Vec<OrderBook> = instruments.iter()
         .map(|i| OrderBook::new(i.tick_size)).collect();
+    let test_mode_str = std::env::var("TEST_MECHANISM").unwrap_or_else(|_| "DETERMINISTIC".into());
+    let test_mode = match test_mode_str.to_uppercase().as_str() {
+        "DETERMINISTIC" => Mechanism::Deterministic,
+        "THROTTLED1MS" => Mechanism::ThrottledTime1ms,
+        "THROTTLED10MS" => Mechanism::ThrottledTime10ms,
+        "THROTTLED100MS" => Mechanism::ThrottledTime100ms,
+        "AGEWEIGHTED" => Mechanism::AgeWeighted,
+        "SIZEWEIGHTED" => Mechanism::SizeWeighted,
+        "ROTATING" => Mechanism::RotatingPriority,
+        "PERPARTICIPANT" => Mechanism::RandomPerParticipant,
+        _ => Mechanism::Deterministic,
+    };
+    println!("  Test mechanism: {:?}", test_mode);
     let mut det_books: Vec<OrderBook> = instruments.iter()
         .map(|i| OrderBook::new(i.tick_size)).collect();
 
@@ -671,7 +675,7 @@ async fn main() {
             }
 
             for order in &mut det_orders {
-                let fills = det_books[idx].match_order(order, Mechanism::Deterministic, batch_id);
+                let fills = det_books[idx].match_order(order, test_mode, batch_id);
                 det_fills.extend(fills);
             }
 

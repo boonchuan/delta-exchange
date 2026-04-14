@@ -20,6 +20,7 @@ use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 use uuid::Uuid;
+mod queue_mechanisms;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -35,7 +36,7 @@ pub enum OrderStatus { New, Partial, Filled, Cancelled, Rejected }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
-pub enum MatchingMode { Deterministic, Clob, Batch }
+pub enum MatchingMode { Deterministic, Clob, Batch, ThrottledTime1ms, ThrottledTime10ms, ThrottledTime100ms, AgeWeighted, SizeWeighted, RotatingPriority, RandomPerParticipant }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Instrument {
@@ -178,12 +179,8 @@ impl MatchingEngine {
                 None => continue,
             };
 
-            // ═══ DETERMINISTIC MATCHING ═══
-            // Shuffle orders at same price level — eliminates latency advantage
-            if self.mode == MatchingMode::Deterministic {
-                let mut rng = rand::thread_rng();
-                resting.shuffle(&mut rng);
-            }
+            // ═══ QUEUE MECHANISM DISPATCH ═══
+            queue_mechanisms::sort_queue(&mut resting, self.mode, ob.sequence);
 
             let mut i = 0;
             while i < resting.len() && order.remaining() > Decimal::ZERO {
@@ -434,7 +431,22 @@ async fn main() {
         .await.expect("DB connect failed");
     info!("Database connected");
 
-    let engine = Arc::new(MatchingEngine::new(MatchingMode::Deterministic));
+    let mode_str = std::env::var("MATCHING_MODE").unwrap_or_else(|_| "DETERMINISTIC".into());
+    let mode = match mode_str.to_uppercase().as_str() {
+        "CLOB" => MatchingMode::Clob,
+        "DETERMINISTIC" => MatchingMode::Deterministic,
+        "THROTTLED1MS" => MatchingMode::ThrottledTime1ms,
+        "THROTTLED10MS" => MatchingMode::ThrottledTime10ms,
+        "THROTTLED100MS" => MatchingMode::ThrottledTime100ms,
+        "AGEWEIGHTED" => MatchingMode::AgeWeighted,
+        "SIZEWEIGHTED" => MatchingMode::SizeWeighted,
+        "ROTATING" => MatchingMode::RotatingPriority,
+        "PERPARTICIPANT" => MatchingMode::RandomPerParticipant,
+        "BATCH" => MatchingMode::Batch,
+        _ => { eprintln!("Unknown mode: {}, defaulting to DETERMINISTIC", mode_str); MatchingMode::Deterministic }
+    };
+    info!("Matching mode: {:?}", mode);
+    let engine = Arc::new(MatchingEngine::new(mode));
     for inst in load_instruments(&pool).await {
         info!("  {} — {}", inst.symbol, inst.name);
         engine.register_instrument(inst);
