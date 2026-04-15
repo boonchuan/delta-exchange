@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use uuid::Uuid;
 mod queue_mechanisms;
+static CUSTOM_THROTTLE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // ══════════════════════════════════════════════════════════════
 //  ΔEXCHANGE — Dual Engine Comparison Simulator
@@ -145,7 +146,7 @@ impl OrderBook {
             };
 
             // ═══ QUEUE MECHANISM DISPATCH ═══
-            queue_mechanisms::sort_queue(&mut resting, mechanism);
+            { let custom = CUSTOM_THROTTLE_US.load(std::sync::atomic::Ordering::SeqCst); if custom > 0 && mechanism != Mechanism::Clob { queue_mechanisms::sort_throttled_custom(&mut resting, custom); } else { queue_mechanisms::sort_queue(&mut resting, mechanism); } }
 
             let mut i = 0;
             while i < resting.len() && order.remaining > 0.0 {
@@ -419,7 +420,7 @@ async fn persist_comparison(pool: &PgPool, symbol: &str, clob_fills: &[Fill], de
     }
 
     for fill in det_fills {
-        let mech = format!("{:?}", fill.mechanism).to_uppercase();
+        let mech = { let custom = CUSTOM_THROTTLE_US.load(std::sync::atomic::Ordering::SeqCst); if custom > 0 && fill.mechanism != Mechanism::Clob { format!("THROTTLED_{}US", custom) } else { format!("{:?}", fill.mechanism).to_uppercase() } };
         let ptype = fill.aggressor_participant.name();
         let _ = sqlx::query(
             "INSERT INTO tick_data (time, symbol, fill_price, fair_value, slippage, mechanism, batch_id, latency_delta, participant_type) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8)"
@@ -503,6 +504,11 @@ async fn main() {
         "SIZEWEIGHTED" => Mechanism::SizeWeighted,
         "ROTATING" => Mechanism::RotatingPriority,
         "PERPARTICIPANT" => Mechanism::RandomPerParticipant,
+        other if other.starts_with("THROTTLED_") => {
+            let us: u64 = other.trim_start_matches("THROTTLED_").trim_end_matches("US").parse().unwrap_or(10000);
+            CUSTOM_THROTTLE_US.store(us, std::sync::atomic::Ordering::SeqCst);
+            Mechanism::Deterministic // placeholder - will be overridden
+        }
         _ => Mechanism::Deterministic,
     };
     println!("  Test mechanism: {:?}", test_mode);

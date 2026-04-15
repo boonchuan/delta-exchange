@@ -110,3 +110,8 @@ fn weighted_shuffle<T>(items: &mut Vec<T>, weights: &[f64], rng: &mut impl Rng) 
         }
     }
 }
+
+/// Generic throttled time priority with arbitrary bucket width in microseconds
+pub fn sort_throttled_custom(orders: &mut Vec<Order>, bucket_us: u64) {
+    sort_throttled(orders, bucket_us);
+}
