@@ -14,6 +14,9 @@ pub fn sort_queue(orders: &mut Vec<Order>, mechanism: Mechanism) {
         Mechanism::SizeWeighted => sort_size_weighted(orders),
         Mechanism::RotatingPriority => sort_rotating(orders),
         Mechanism::RandomPerParticipant => sort_per_participant(orders),
+        Mechanism::Fba100ms => {} // FBA handled by fba::clear_batch
+        Mechanism::Fba10ms => {} // FBA handled by fba::clear_batch
+        Mechanism::MicroBatch => {} // handled by fba::clear_microbatch
     }
 }
 

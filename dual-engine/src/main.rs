@@ -1,3 +1,4 @@
+mod fba;
 use chrono::{DateTime, Utc};
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -25,7 +26,7 @@ static CUSTOM_THROTTLE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 enum Side { Buy, Sell }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mechanism { Clob, Deterministic, ThrottledTime1ms, ThrottledTime10ms, ThrottledTime100ms, AgeWeighted, SizeWeighted, RotatingPriority, RandomPerParticipant }
+enum Mechanism { Clob, Deterministic, ThrottledTime1ms, ThrottledTime10ms, ThrottledTime100ms, AgeWeighted, SizeWeighted, RotatingPriority, RandomPerParticipant, Fba100ms, Fba10ms, MicroBatch }
 
 #[derive(Debug, Clone)]
 struct Order {
@@ -401,12 +402,12 @@ fn stddev(data: &[f64]) -> f64 {
 
 // ─── Database Persistence ───
 
-async fn persist_comparison(pool: &PgPool, symbol: &str, clob_fills: &[Fill], det_fills: &[Fill]) {
+async fn persist_comparison(pool: &PgPool, symbol: &str, clob_fills: &[Fill], det_fills: &[Fill], run_id_ref: &str) {
     for fill in clob_fills {
         let mech = "CLOB";
         let ptype = fill.aggressor_participant.name();
         let _ = sqlx::query(
-            "INSERT INTO tick_data (time, symbol, fill_price, fair_value, slippage, mechanism, batch_id, latency_delta, participant_type) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8)"
+            "INSERT INTO tick_data (time, symbol, fill_price, fair_value, slippage, mechanism, batch_id, latency_delta, participant_type, run_id) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9)"
         )
         .bind(symbol)
         .bind(Decimal::from_f64(fill.price).unwrap_or(Decimal::ZERO))
@@ -416,6 +417,7 @@ async fn persist_comparison(pool: &PgPool, symbol: &str, clob_fills: &[Fill], de
         .bind(fill.batch_id as i64)
         .bind(Decimal::from_f64(fill.latency_delta_us as f64).unwrap_or(Decimal::ZERO))
         .bind(ptype)
+        .bind(&run_id_ref)
         .execute(pool).await.ok();
     }
 
@@ -423,7 +425,7 @@ async fn persist_comparison(pool: &PgPool, symbol: &str, clob_fills: &[Fill], de
         let mech = { let custom = CUSTOM_THROTTLE_US.load(std::sync::atomic::Ordering::SeqCst); if custom > 0 && fill.mechanism != Mechanism::Clob { format!("THROTTLED_{}US", custom) } else { format!("{:?}", fill.mechanism).to_uppercase() } };
         let ptype = fill.aggressor_participant.name();
         let _ = sqlx::query(
-            "INSERT INTO tick_data (time, symbol, fill_price, fair_value, slippage, mechanism, batch_id, latency_delta, participant_type) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8)"
+            "INSERT INTO tick_data (time, symbol, fill_price, fair_value, slippage, mechanism, batch_id, latency_delta, participant_type, run_id) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9)"
         )
         .bind(symbol)
         .bind(Decimal::from_f64(fill.price).unwrap_or(Decimal::ZERO))
@@ -433,6 +435,7 @@ async fn persist_comparison(pool: &PgPool, symbol: &str, clob_fills: &[Fill], de
         .bind(fill.batch_id as i64)
         .bind(Decimal::from_f64(fill.latency_delta_us as f64).unwrap_or(Decimal::ZERO))
         .bind(ptype)
+        .bind(&run_id_ref)
         .execute(pool).await.ok();
     }
 }
@@ -504,6 +507,15 @@ async fn main() {
         "SIZEWEIGHTED" => Mechanism::SizeWeighted,
         "ROTATING" => Mechanism::RotatingPriority,
         "PERPARTICIPANT" => Mechanism::RandomPerParticipant,
+        "FBA100MS" | "FBA_100MS" | "FBA100" => Mechanism::Fba100ms,
+        "FBA10MS" | "FBA_10MS" | "FBA10" => Mechanism::Fba10ms,
+        "MICROBATCH" | "MICRO_BATCH" => Mechanism::MicroBatch,
+        "FBA1MS" => Mechanism::Fba10ms,   // reuse 10ms variant, actual interval from env
+        "FBA5MS" => Mechanism::Fba10ms,
+        "FBA25MS" => Mechanism::Fba100ms,
+        "FBA50MS" => Mechanism::Fba100ms,
+        "FBA250MS" => Mechanism::Fba100ms,
+        "FBA500MS" => Mechanism::Fba100ms,
         other if other.starts_with("THROTTLED_") => {
             let us: u64 = other.trim_start_matches("THROTTLED_").trim_end_matches("US").parse().unwrap_or(10000);
             CUSTOM_THROTTLE_US.store(us, std::sync::atomic::Ordering::SeqCst);
@@ -511,7 +523,13 @@ async fn main() {
         }
         _ => Mechanism::Deterministic,
     };
+    let order_splitting = std::env::var("ORDER_SPLITTING").unwrap_or_default() == "true";
     println!("  Test mechanism: {:?}", test_mode);
+    if order_splitting { println!("  ORDER SPLITTING: HFTs will split orders 5x in test engine"); }
+    let run_id = std::env::var("RUN_ID").unwrap_or_else(|_| "default".into());
+    let split_factor: u32 = std::env::var("SPLIT_FACTOR").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+    println!("  Run ID: {}", run_id);
+    if order_splitting { println!("  Split factor: {}x", split_factor); }
     let mut det_books: Vec<OrderBook> = instruments.iter()
         .map(|i| OrderBook::new(i.tick_size)).collect();
 
@@ -680,9 +698,38 @@ async fn main() {
                 clob_fills.extend(fills);
             }
 
-            for order in &mut det_orders {
-                let fills = det_books[idx].match_order(order, test_mode, batch_id);
-                det_fills.extend(fills);
+            // ═══ STRATEGIC ORDER SPLITTING (Vives critique test) ═══
+            if order_splitting {
+                let mut split_orders: Vec<Order> = Vec::new();
+                let mut next_id = order_id_counter + 100000; // avoid ID collisions
+                for order in &det_orders {
+                    if order.participant == ParticipantType::HFT && order.remaining > 1.0 {
+                        // HFT splits into N orders of equal size
+                        let split_qty = order.remaining / split_factor as f64;
+                        for s in 0..split_factor {
+                            next_id += 1;
+                            let mut split = order.clone();
+                            split.id = next_id;
+                            split.quantity = split_qty;
+                            split.remaining = split_qty;
+                            // Slightly vary timestamp to simulate rapid submission
+                            split.timestamp_us = order.timestamp_us + s as u64;
+                            split_orders.push(split);
+                        }
+                    } else {
+                        split_orders.push(order.clone());
+                    }
+                }
+                det_orders = split_orders;
+            }
+            // ═══ FBA or serial matching dispatch ═══
+            if matches!(test_mode, Mechanism::Fba100ms | Mechanism::Fba10ms | Mechanism::MicroBatch) {
+                if test_mode == Mechanism::MicroBatch { det_fills = fba::clear_microbatch(&mut det_orders, test_mode, batch_id); } else { det_fills = fba::clear_batch(&mut det_orders, test_mode, batch_id); }
+            } else {
+                for order in &mut det_orders {
+                    let fills = det_books[idx].match_order(order, test_mode, batch_id);
+                    det_fills.extend(fills);
+                }
             }
 
             // Accumulate stats
@@ -707,8 +754,9 @@ async fn main() {
                 let sym = inst.symbol.clone();
                 let cf = clob_fills.clone();
                 let df = det_fills.clone();
+                let rid = run_id.clone();
                 tokio::spawn(async move {
-                    persist_comparison(&p, &sym, &cf, &df).await;
+                    persist_comparison(&p, &sym, &cf, &df, &rid).await;
                 });
             }
         }
